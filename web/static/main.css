@@ -1,0 +1,21 @@
+body {
+	font: normal 11px auto "Trebuchet MS", Verdana, Arial, Helvetica, sans-serif;
+	color: #4f6b72;
+	background: #E6EAE9;
+}
+#run_code{
+	width:90%;
+	height:40%;
+	margin: 10px 5%;
+}
+#result{
+	width:100%;
+	word-break: break-all;
+	word-wrap:break-word;
+	line-height:180%
+}
+a { color: #c75f3e; }
+.red{color:red;font-size:15px;font-weight:bold;}
+.green{color:green;font-size:15px;font-weight:bold;}
+a:link{text-decoration:none; color:blue;font-size:15px;padding:3px;}
+a:hover{text-decoration:underline;}
