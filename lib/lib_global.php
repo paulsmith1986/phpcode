@@ -249,25 +249,33 @@ function dump_run_sql ()
 function save_game_log ( $log_str, $pre_fix )
 {
 	global $LOG_FILE;
-	$now_time = time();
 	//未打开该文件类型
 	if ( !isset( $LOG_FILE[ $pre_fix ] ) )
 	{
-		$file_path = $GLOBALS[ 'GAME_INI' ][ 'log_path' ] .'/'. $GLOBALS[ 'SERVER_HOST' ] .'/';
-		if ( !is_dir( $file_path ) && !mkdir( $file_path, '0755', true ) )
-		{
-			die( 'Log path:'. $file_path ." is not exist!\n" );
-		}
-		$file_name = $file_path . $pre_fix .'_'. date( 'Ymd', $now_time ) .'.log';
+		$file_name = make_log_file( $pre_fix );
 		$f_handle = fopen( $file_name, 'a+' );
-		//如果文件不可写
-		if ( !is_writable( $file_name ) )
-		{
-			die( 'Log file:'. $file_name ." is unwriteable!\n" );
-		}
 		$LOG_FILE[ $pre_fix ] = $f_handle;
 	}
-	fwrite( $LOG_FILE[ $pre_fix ], "\n[". date( 'H:i:s', $now_time ) ."]\n". $log_str );
+	fwrite( $LOG_FILE[ $pre_fix ], "\n[". date( 'H:i:s', time() ) ."]\n". $log_str );
+}
+
+/**
+ * 初始化日志文件
+ * @param string $pre_fix 日志文件前缀
+ */
+function make_log_file( $pre_fix )
+{
+	$file_path = $GLOBALS[ 'GAME_INI' ][ 'log_path' ] .'/'. $GLOBALS[ 'SERVER_HOST' ] .'/';
+	if ( !is_dir( $file_path ) && !mkdir( $file_path, '0755', true ) )
+	{
+		die( 'Log path:'. $file_path ." is not exist!\n" );
+	}
+	//如果文件不可写
+	if ( !is_writable( $file_path ) )
+	{
+		die( 'Log path:'. $file_path ." is unwriteable!\n" );
+	}
+	return $file_path . $pre_fix .'_'. date( 'Ymd', time() ) .'.log';
 }
 
 /**
@@ -407,6 +415,10 @@ function fpm_connect_im( $socket_type, $is_poll = true )
 {
 	global $IM_SERVER_PING, $PROTOCOL_ID_LIST, $GAME_IM;
 	$IM_SERVER_PING = first_socket_fd( $GAME_IM[ 'lan_host' ], $GAME_IM[ 'port' ], $is_poll );
+	if ( $IM_SERVER_PING < 0 )
+	{
+		return false;
+	}
 	$pack_id = $PROTOCOL_ID_LIST[ 'so_php_join' ];
 	$re = first_send_pack( $IM_SERVER_PING, $pack_id, array( 'socket_type' => $socket_type, 'join_str' => $GAME_IM[ 'super_key' ] ) );
 	if ( true !== $re )

@@ -6,15 +6,16 @@ require_once ROOT_PATH .'lib/lib_global.php';
  */
 function fpm_proxy( $req_data )
 {
-	global $proxy_poll;
-	$fpm_id = fpm_idle();
-	if ( false === $fpm_id )
+	global $fpm_list;
+	$fpm_id = $req_data[ 'hash_id' ] % $GLOBALS[ 'FPM_CHILD_NUM' ];
+	$fpm_info = $fpm_list[ $fpm_id ];
+	if ( $fpm_info[ 'fd' ] > 0 && FIRST_FPM_STATUS_IDLE == $fpm_info[ 'status' ] )
 	{
-		$proxy_poll[] = $req_data;
+		fpm_wakeup( $fpm_id, $req_data );
 	}
 	else
 	{
-		fpm_wakeup( $fpm_id, $req_data );
+		$fpm_list[ $fpm_id ][ 'proxy' ][] = $req_data;
 	}
 }
 
@@ -26,12 +27,11 @@ function fpm_proxy( $req_data )
 function fpm_wakeup( $fpm_id, $data )
 {
 	global $fpm_list;
-	if ( !isset( $fpm_list[ $fpm_id ] ) )
+	$fpm_info = $fpm_list[ $fpm_id ];
+	if ( $fpm_info[ 'fd' ] < 0 )
 	{
-		trigger_error( 'No fpm_id:'. $fpm_id .' running!', E_USER_WARNING );
 		return;
 	}
-	$fpm_info = $fpm_list[ $fpm_id ];
 	first_send_data( $fpm_info[ 'fd' ], $data[ 'proto_data' ] );
 	$fpm_list[ $fpm_id ][ 'status' ] = FIRST_FPM_STATUS_WORK;
 }
@@ -39,43 +39,60 @@ function fpm_wakeup( $fpm_id, $data )
 /**
  * 初始化进程
  * @param string $file_name 进程的文件名
- * @param bool $is_main 是否是主进程
+ * @param int $fpm_type 进程类型
  */
-function fpm_init( $file_name, $is_main )
+function fpm_init( $file_name, $fpm_type )
 {
-	global $argv, $PROTOCOL_ID_LIST;
+	global $argv, $PROTOCOL_ID_LIST, $FPM_RUN_FLAG;
 	if ( isset( $argv[ 2 ] ) && is_numeric( $argv[ 2 ] ) )
 	{
 		$GLOBALS[ 'PHP_FPM_PID' ] = (int)$argv[ 2 ];
 	}
+	$FPM_RUN_FLAG = true;
 	$GLOBALS[ 'TASK_FILE' ] = basename( $file_name, '.php' );
-	$socket_type = $is_main ? 2 : 1;
-	$im_sock_fd = fpm_connect_im( $socket_type );
-	if ( $im_sock_fd < 0 )
+	if ( FIRST_FPM_MAIN == $fpm_type )
 	{
-		show_excp( 'Can not join im server' );
+		//创建主机
+		first_host( '127.0.0.1', $GLOBALS[ 'FPM_CONF' ][ 'port' ] );
+		first_set_fpm_type( FIRST_FPM_MAIN );
+		fpm_init_child();
+		fpm_main_timeup( null );
 	}
 	else
 	{
-		if ( $is_main )
+		$join_re = fpm_connect_im( $fpm_type );
+		if ( !$join_re )
 		{
-			fpm_main_set_timeout();
-			//创建主机
-			first_host( '127.0.0.1', $GLOBALS[ 'FPM_CONF' ][ 'port' ] );
-			first_set_fpm_type( FIRST_FPM_MAIN );
+			show_excp( 'Can not join im server' );
 		}
-		else
-		{
-			first_set_fpm_type( FIRST_FPM_SUB );
-			$GLOBALS[ 'FPM_MAIN_FD' ] = first_socket_fd( '127.0.0.1', $GLOBALS[ 'FPM_CONF' ][ 'port' ] );
-			$data = array( 'pid' => first_getpid(), 'fpm_id' => $GLOBALS[ 'PHP_FPM_PID' ] );
-			fpm_child_to_main( 'fpm_join', $data );
-		}
+		first_set_fpm_type( FIRST_FPM_SUB );
+		$GLOBALS[ 'FPM_MAIN_FD' ] = first_socket_fd( '127.0.0.1', $GLOBALS[ 'FPM_CONF' ][ 'port' ] );
+		$data = array( 'pid' => first_getpid(), 'fpm_id' => $GLOBALS[ 'PHP_FPM_PID' ] );
+		fpm_child_to_main( 'fpm_join', $data );
 	}
 	//日志文件检查
 	fpm_check_log_file();
 	//设置需要捕获的信号
 	first_signal_fd( array( FIRST_SIGHUP, FIRST_SIGINT, FIRST_SIGTERM, FIRST_SIGPIPE, FIRST_SIGUSR1, FIRST_SIGUSR2 ) );
+}
+
+/**
+ * 初始化子进程
+ */
+function fpm_init_child()
+{
+	global $fpm_list, $FPM_CHILD_NUM;
+	$FPM_CHILD_NUM = $GLOBALS[ 'FPM_CONF' ][ 'max_fpm' ];
+	$fpm_list = array();
+	for ( $i = 0; $i < $FPM_CHILD_NUM; ++$i )
+	{
+		$fpm_info = array(
+			'status'		=> FIRST_FPM_STATUS_IDLE,
+			'fd'			=> -1,
+			'proxy'			=> array(),					//代理池列表
+		);
+		$fpm_list[ $i ] = $fpm_info;
+	}
 }
 
 /**
@@ -97,12 +114,16 @@ function fpm_main_set_timeout()
  */
 function fpm_child_to_main( $pack_name, $data )
 {
-	global $PROTOCOL_ID_LIST;
+	global $PROTOCOL_ID_LIST, $FPM_MAIN_FD;
+	if ( -1 == $FPM_MAIN_FD )
+	{
+		return;
+	}
 	$pack_id = $PROTOCOL_ID_LIST[ $pack_name ];
-	$re = first_send_pack( $GLOBALS[ 'FPM_MAIN_FD' ], $pack_id, $data );
+	$re = first_send_pack( $FPM_MAIN_FD, $pack_id, $data );
 	if ( true !== $re )
 	{
-		show_excp( 'Can not join fpm_main' );
+		show_excp( 'Can not set data to fpm_main' );
 	}
 }
 
@@ -117,25 +138,58 @@ function fpm_join_mod( $req_data )
 	$fd_info = array(
 		'pid'			=> $req_data[ 'pid' ],
 		'ping'			=> time(),
-		'fpm_id'		=> $fpm_id
+		'fpm_id'		=> -1
 	);
-	$connect_list[ $fd ] = $fd_info;
-	//该作业进程已经存在
-	if ( isset( $fpm_list[ $fpm_id ] ) )
+	//fpm_id出错
+	if ( !isset( $fpm_list[ $fpm_id ] ) )
 	{
-		$fpm_info = $fpm_list[ $fpm_id ];
-		$fpm_fd_info = $connect_list[ $fpm_info[ 'fd' ] ];
-		first_kill( $fpm_fd_info[ 'pid' ] );
-		unset( $fpm_list[ $fpm_id ] );
+		show_error( 'Join bad fpm, fpm_id:', $fpm_id, "\n" );
+		fpm_close_fd( $fd );
+		return;
 	}
 	echo 'Join child pid:', $fpm_id, "\n";
-	$fpm_info = array(
-		'status'		=> FIRST_FPM_STATUS_IDLE,
-		'fd'			=> $fd,
-	);
-	$fpm_list[ $fpm_id ] = $fpm_info;
-	$report = array( 'fpm_id' => $fpm_id );
+	$fpm_info = $fpm_list[ $fpm_id ];
+	if ( $fpm_info[ 'fd' ] > 0 )
+	{
+		fpm_close_fd( $fpm_info[ 'fd' ] );
+	}
+	$fd_info[ 'fpm_id' ] = $fpm_id;
+	$connect_list[ $fd ] = $fd_info;
+	$fpm_list[ $fpm_id ][ 'fd' ] = $fd;
+	$report = array( 'fpm_id' => $fpm_id, 'fd' => $fd );
 	fpm_idle_report_mod( $report );
+}
+
+/**
+ * 关闭一个fd
+ * @param int $fd 连接标志
+ * @param bool $force_kill 是否强杀
+ */
+function fpm_close_fd( $fd, $force_kill = false )
+{
+	global $connect_list, $fpm_list;
+	$fd_info = fpm_get_fd_info( $fd );
+	if ( $fd_info )
+	{
+		$fpm_id = $fd_info[ 'fpm_id' ];
+		if ( $fpm_id >= 0 && isset( $fpm_list[ $fpm_id ] ) && $fpm_list[ $fpm_id ][ 'fd' ] == $fd )
+		{
+			$fpm_list[ $fpm_id ][ 'fd' ] = -1;
+		}
+		first_kill( $fd_info[ 'pid' ], $force_kill ? FIRST_SIGKILL : FIRST_SIGTERM );
+	}
+	unset( $connect_list[ $fd ] );
+}
+
+/**
+ * 获取一个fd的信息
+ * @param int $fd 连接id
+ *
+ */
+function fpm_get_fd_info( $fd )
+{
+	global $connect_list;
+	return isset( $connect_list[ $fd ] ) ? $connect_list[ $fd ] : null;
 }
 
 /**
@@ -159,37 +213,31 @@ function fpm_ping_re_mod( $req_data )
  */
 function fpm_quit_mod( $req_data )
 {
-	global $connect_list, $fpm_list, $SERVICE_RUN_FLAG;
 	$fd = $req_data[ 'fd' ];
-	if ( !isset( $connect_list[ $fd ] ) )
+	if ( $GLOBALS[ 'IM_SERVER_PING' ] == $fd )
+	{
+		echo "Im fd quit!\n";
+		$GLOBALS[ 'IM_SERVER_PING' ] = -1;
+		return;
+	}
+	//进程正在关闭
+	if ( !$GLOBALS[ 'FPM_RUN_FLAG' ] )
 	{
 		return;
 	}
-	//主进程退出
-	if ( !$SERVICE_RUN_FLAG )
+	$fd_info = fpm_get_fd_info( $fd );
+	if ( !$fd_info )
 	{
 		return;
 	}
-	$fd_info = $connect_list[ $fd ];
+	global $connect_list, $fpm_list;
+	echo 'Close fd:',$fd, ' pid:', $fd_info[ 'pid' ], ' fpm_id:', $fd_info[ 'fpm_id' ];
 	$fpm_id = $fd_info[ 'fpm_id' ];
-	echo 'Child fpm quit, pid:', $fpm_id, "\n";
 	unset( $connect_list[ $fd ] );
 	if ( isset( $fpm_list[ $fpm_id ] ) && $fpm_list[ $fpm_id ][ 'fd' ] == $fd )
 	{
-		unset( $fpm_list[ $fpm_id ] );
-	}
-	//正在退出
-	if ( $GLOBALS[ 'SERVICE_QUIT_FLAG' ] )
-	{
-		//如果所有子进程都退出了，主进程也退出
-		if ( empty( $fpm_list ) )
-		{
-			$SERVICE_RUN_FLAG = false;
-		}
-	}
-	else
-	{
-		fpm_check_child( );
+		$fpm_list[ $fpm_id ][ 'fd' ] = -1;
+		fpm_check_child();
 	}
 }
 
@@ -215,52 +263,43 @@ function fpm_daemon()
  */
 function fpm_idle_report_mod( $req_data )
 {
-	global $proxy_poll, $fpm_list;
+	global $connect_list, $fpm_list;
+	$fd = $req_data[ 'fd' ];
+	if ( !isset( $connect_list[ $fd ] ) )
+	{
+		return;
+	}
 	$fpm_id = $req_data[ 'fpm_id' ];
-	if ( isset( $fpm_list[ $fpm_id ] ) )
+	$fd_info = $fpm_list[ $fpm_id ];
+	//有数据待发
+	if ( !empty( $fd_info[ 'proxy' ] ) )
+	{
+		$proto_data = array_shift( $fpm_list[ $fpm_id ][ 'proxy' ] );
+		fpm_wakeup( $fpm_id, $proto_data );
+	}
+	else
 	{
 		$fpm_list[ $fpm_id ][ 'status' ] = FIRST_FPM_STATUS_IDLE;
 	}
-	//没有数据待发
-	if ( !empty( $proxy_poll ) )
-	{
-		$proto_data = array_shift( $proxy_poll );
-		fpm_wakeup( $fpm_id, $proto_data );
-	}
-}
-
-/**
- * 获取空闲的服务进程
- */
-function fpm_idle()
-{
-	global $fpm_list;
-	$re = false;
-	foreach ( $fpm_list as $fpm_id => $fpm_info )
-	{
-		if ( FIRST_FPM_STATUS_IDLE == $fpm_info[ 'status' ] )
-		{
-			$re = $fpm_id;
-			break;
-		}
-	}
-	return $re;
 }
 
 /**
  * 检查进程个数
- * @param bool $ignore_run 是否忽略已经运行的进程
  */
-function fpm_check_child( $ignore_run = false )
+function fpm_check_child( )
 {
-	global $FPM_CONF, $fpm_list;
-	for ( $i = 0; $i < $FPM_CONF[ 'max_fpm' ]; ++$i )
+	global $fpm_list;
+	foreach ( $fpm_list as $fpm_id => $fpm_info )
 	{
-		if ( isset( $fpm_list[ $i ] ) && !$ignore_run )
+		if ( -1 != $fpm_info[ 'fd' ] )
 		{
-			continue;
+			$fd_info = fpm_get_fd_info( $fpm_info[ 'fd' ] );
+			if ( $fd_info )
+			{
+				continue;
+			}
 		}
-		fpm_start( $i );
+		fpm_start( $fpm_id );
 	}
 }
 
@@ -270,7 +309,8 @@ function fpm_check_child( $ignore_run = false )
  */
 function fpm_start( $pid )
 {
-	$cmd = 'php '. ROOT_PATH .'bin/fpm.php '. $GLOBALS[ 'SERVER_HOST' ] .' '. $pid .' >> /dev/null 2>&1 &';
+	$start_log_file = make_log_file( 'run' );
+	$cmd = 'php '. ROOT_PATH .'bin/fpm.php '. $GLOBALS[ 'SERVER_HOST' ] .' '. $pid .' >> '. $start_log_file .' 2>&1 &';
 	exec( $cmd );
 }
 
@@ -290,6 +330,7 @@ function fpm_wait( $callback, $is_main = false )
 	foreach ( $req_list as $each_req )
 	{
 		ob_start();
+		pr( $each_req );
 		try
 		{
 			$callback( $each_req );
@@ -353,6 +394,11 @@ function fpm_event( $req_data )
 		case FIRST_SIGNAL:			//信号
 			fpm_signal( $req_data );
 		break;
+		case FIRST_SOCKET_CLOSE:
+			echo "Fpm socket close!\n";
+			$GLOBALS[ 'FPM_RUN_FLAG' ] = false;
+			$GLOBALS[ 'FPM_MAIN_FD' ] = -1;
+		break;
 	}
 }
 
@@ -366,24 +412,14 @@ function fpm_main_signal( $signal_arr )
 	switch ( $signal_arr[ 'signal' ] )
 	{
 		case FIRST_SIGINT:	//Ctrl + c
-			fpm_kill_all();
-			//没有任何进程加入,直接退出
-			if ( empty( $GLOBALS[ 'fpm_list' ] ) )
-			{
-				$GLOBALS[ 'SERVICE_RUN_FLAG' ] = false;
-			}
-			else
-			{
-				$GLOBALS[ 'SERVICE_QUIT_FLAG' ] = true;
-			}
-		break;
 		case FIRST_SIGTERM:	//kill
 			fpm_kill_all();
-			$GLOBALS[ 'SERVICE_RUN_FLAG' ] = false;
+			$GLOBALS[ 'FPM_RUN_FLAG' ] = false;
 		break;
 		case FIRST_SIGUSR1:	//代码更新, 子进程重新加载
 			echo "All child restart!\n";
-			fpm_check_child( true );
+			fpm_kill_all();
+			fpm_check_child();
 		break;
 	}
 }
@@ -400,6 +436,7 @@ function fpm_signal( $signal_arr )
 		case FIRST_SIGINT:	//Ctrl + c
 		case FIRST_SIGTERM:	//kill
 			$GLOBALS[ 'FPM_RUN_FLAG' ] = false;
+			$GLOBALS[ 'FPM_MAIN_FD' ] = -1;
 		break;
 	}
 }
@@ -481,12 +518,21 @@ function fpm_dispatch( $pack_id, $req_data )
 }
 
 /**
- * 主进程倒计时事件
+ * 主进程周期性检查
  * @param array $req_array 收到的数据包
  */
 function fpm_main_timeup( $rea_array )
 {
 	global $connect_list;
+	fpm_main_set_timeout();
+	if ( $GLOBALS[ 'IM_SERVER_PING' ] < 0 )
+	{
+		$join_re = fpm_connect_im( FIRST_FPM_MAIN );
+		if ( !$join_re )
+		{
+			return;
+		}
+	}
 	echo "Fpm_main ping child.\n";
 	$time = time();
 	$pack_id = $GLOBALS[ 'PROTOCOL_ID_LIST' ][ 'fpm_ping' ];
@@ -495,15 +541,14 @@ function fpm_main_timeup( $rea_array )
 		//30秒以上不响应ping的进程，kill掉
 		if ( $time - $fd_info[ 'ping' ] > 30 )
 		{
-			echo "[Warning] Child no answer!\n";
-			first_kill( $fd_info[ 'pid' ], 9 );
+			fpm_close_fd( $fd, true );
 		}
 		else
 		{
 			first_send_pack( $fd, $pack_id, array( 'time' => $time ) );
 		}
 	}
-	fpm_main_set_timeout();
+	fpm_check_child();
 }
 
 /**
@@ -531,9 +576,51 @@ function fpm_check_log_file()
 function fpm_kill_all()
 {
 	global $connect_list;
-	foreach ( $connect_list as $fd_info )
+	foreach ( $connect_list as $fd => $fd_info )
 	{
-		first_kill( $fd_info[ 'pid' ] );
+		fpm_close_fd( $fd );
+	}
+}
+
+/**
+ * 执行fpm的shell命令
+ * @param int $cmd_type 命令类型
+ */
+function fpm_run_shell( $cmd_type = 0 )
+{
+	$grep_str = '"/fpm.php '. $GLOBALS[ 'SERVER_HOST' ] .' [0-9]"';
+	switch ( $cmd_type )
+	{
+		case 0:		//返回进程个数
+			$cmd = 'ps -efww | grep '. $grep_str .'|grep -v grep|wc -l';
+			exec( $cmd, $out );
+			$exec_num = isset( $out[ 0 ] ) ? $out[ 0 ] : 0;
+			return $exec_num;
+		break;
+		case 1:
+			$cmd = 'ps -efww | grep '. $grep_str .'|grep -v grep|awk \'{ print $2 }\'|xargs --no-run-if-empty kill -9';
+			exec( $cmd );
+		break;
+	}
+}
+
+/**
+ * 主进程等待子进程全部退出
+ */
+function fpm_main_wait_child_quit()
+{
+	$retry = 0;
+	while ( fpm_run_shell() > 0 && $retry < 100 )
+	{
+		++$retry;
+		usleep( 100000 );
+	}
+	//还有子进程运行，强退
+	if ( fpm_run_shell() > 0 )
+	{
+		echo "Kill child -9";
+		fpm_run_shell( 1 );
+		sleep( 1 );
 	}
 }
 

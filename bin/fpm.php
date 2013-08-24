@@ -12,8 +12,7 @@ require_once ROOT_PATH .'func/im_func.php';
 require_once ROOT_PATH .'func/game_func.php';
 require_once ROOT_PATH .'main/etc/include.php';
 //初始化进程
-fpm_init( __FILE__, false );
-$FPM_RUN_FLAG = true;
+fpm_init( __FILE__, YILE_FPM_SUB );
 while( $FPM_RUN_FLAG )
 {
 	fpm_wait( 'fpm_event' );

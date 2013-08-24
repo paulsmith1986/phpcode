@@ -136,7 +136,7 @@ function do_end ( $fatal_error = false )
 			}
 			send_im_data();
 			clear_global_var();
-			if ( -1 !== $GLOBALS[ 'IM_SERVER_PING' ] )
+			if ( $GLOBALS[ 'IM_SERVER_PING' ] < 0 )
 			{
 				first_close_fd( $GLOBALS[ 'IM_SERVER_PING' ] );
 			}

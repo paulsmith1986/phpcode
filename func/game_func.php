@@ -133,7 +133,7 @@ function send_im_data()
 	{
 		return;
 	}
-	if ( -1 == $IM_SERVER_PING )
+	if ( $IM_SERVER_PING < 0 )
 	{
 		fpm_connect_im( FIRST_FPM_SUB, $GLOBALS[ 'SERVER_TYPE' ] == SERVER_TYPE_SOCKET );
 	}
